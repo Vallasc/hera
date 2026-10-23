@@ -1,0 +1,38 @@
+name: hera_client
+description: >-
+  Client for the HERA protocol (PROTOCOL.md, version 4): BLE discovery and
+  provisioning, encrypted control (TCP) and audio (UDP) channels over WiFi,
+  and an optional USB serial transport.
+version: 0.3.0
+publish_to: none
+
+environment:
+  sdk: ^3.5.0
+  flutter: '>=3.24.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  hera_audio:
+    path: ../hera_audio
+
+  # BLE discovery and provisioning (PROTOCOL.md §3). Pinned to 1.x: 2.0 and
+  # later are distributed under the FlutterBluePlus License, which is free
+  # only below a company-size threshold.
+  flutter_blue_plus: ^1.36.0
+
+  # Bluetooth and network permissions.
+  permission_handler: ^12.0.0
+
+  # Encrypted profile (PROTOCOL.md §11): X25519, HKDF-SHA256,
+  # ChaCha20-Poly1305. Pure Dart.
+  cryptography: ^2.7.0
+
+  # USB serial transport: USB host on Android, libserialport on desktop.
+  usb_serial: ^0.5.2
+  flutter_libserialport: ^0.6.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0

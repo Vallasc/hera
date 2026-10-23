@@ -1,0 +1,41 @@
+# systemd unit for the HERA device.
+#
+#   sudo cp hera-device.service /etc/systemd/system/
+#   sudo systemctl enable --now hera-device
+#
+# CMD REBOOT (§9 0x7F) exits with code 75, which Restart=always turns into a
+# clean restart of the service.
+
+[Unit]
+Description=HERA device (Bluetooth hands-free relay over IP)
+After=bluetooth.service
+Requires=bluetooth.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/hera
+ExecStart=/opt/hera/hera-device
+Restart=always
+RestartSec=2
+
+# Hand the WiFi interface back to NetworkManager however the service exits.
+# The service does this itself on a clean exit, but not after SIGKILL or a
+# crash. The leading `-` ignores a missing nmcli. The interface name is fixed
+# here: update it if HERA_WIFI_IFACE is changed.
+ExecStopPost=-/usr/bin/nmcli device set wlan0 managed yes
+
+# Note: once enabled, the service starts at every boot and takes over wlan0,
+# so the Pi will not rejoin its usual WiFi network. During development, run the
+# binary by hand or use HERA_NET_MODE=none.
+
+# Raw Bluetooth and SCO sockets need root; SCHED_FIFO for the audio thread
+# needs the real-time capability.
+User=root
+LimitRTPRIO=99
+LimitMEMLOCK=infinity
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

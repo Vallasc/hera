@@ -1,0 +1,19 @@
+.DS_Store
+
+# device build outputs and local configuration
+device/hera-device
+device/tests/test_proto
+device/tests/test_link
+device/tests/test_link_tsan
+device/tests/link_server
+device/tools/hera_probe
+device/src/*.o
+device/src/*.d
+device/.env
+device/last_device
+
+# Dart / Flutter
+.dart_tool/
+build/
+.flutter-plugins-dependencies
+pubspec.lock
