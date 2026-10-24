@@ -327,15 +327,30 @@ void audio_push_gap(audio_t *a, unsigned blocks)
     pthread_mutex_unlock(&a->jb_lock);
 }
 
-unsigned audio_buffered_ms(audio_t *a)
+/* Queued audio in ms. */
+static unsigned queued_ms(audio_t *a)
 {
-    if (!a)
-        return 0;
     pthread_mutex_lock(&a->jb_lock);
     unsigned ms = (unsigned)a->jb_count *
                   (a->frame_ms ? a->frame_ms : PROTO_MAX_FRAME_MS);
     pthread_mutex_unlock(&a->jb_lock);
-    return ms + __atomic_load_n(&a->play_ms, __ATOMIC_RELAXED);
+    return ms;
+}
+
+/* Any thread, for statistics: the playback ring depth is the value published
+ * by the audio thread after each SCO packet. */
+unsigned audio_buffered_ms(audio_t *a)
+{
+    if (!a)
+        return 0;
+    return queued_ms(a) + __atomic_load_n(&a->play_ms, __ATOMIC_RELAXED);
+}
+
+/* Audio thread: the exact depth, including what refill_play() has just
+ * added to the ring. The adaptive policy (§6.5) works on this value. */
+static unsigned depth_ms(audio_t *a)
+{
+    return queued_ms(a) + (unsigned)(a->play_len / (SCO_RATE / 1000));
 }
 
 unsigned audio_target_ms(audio_t *a)
@@ -374,7 +389,7 @@ static void refill_play(audio_t *a)
         return;
 
     uint64_t now = now_ms();
-    unsigned depth = audio_buffered_ms(a);
+    unsigned depth = depth_ms(a);
 
     if (!a->playing) {
         /* Refill up to the current adaptive target. */

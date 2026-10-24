@@ -182,9 +182,30 @@ class HeraSession {
   bool get isFreeRunning => _freeRunning;
   bool _freeRunning = false;
 
+  /// Uplink blocks sent by the local timer and not yet matched by downlink
+  /// blocks (§6.4.1).
+  ///
+  /// The downlink usually "stops" because this side stopped reading it: the
+  /// event loop was busy (a local model, garbage collection) for more than
+  /// 60 ms. The blocks were not lost, they were queued, and they all arrive
+  /// together afterwards. The timer already sent uplink for that time; sending
+  /// one more block per queued block too put the device more than real time
+  /// ahead, its jitter buffer overflowed and dropped audio (`ul_late`), and
+  /// the phone heard choppy speech. Queued blocks are recognised by their
+  /// timestamps, which continue where the downlink stopped, and use this
+  /// credit up before anything else is sent.
+  int _freeRunCredit = 0;
+
   /// True while the phone's audio channel is open.
   bool get isAudioOpen => _audioOpen;
   bool _audioOpen = false;
+
+  /// Epoch of the stream ended by the last `AUDIO_CLOSE`. Its blocks can
+  /// still arrive afterwards: UDP is not ordered with the control channel,
+  /// and blocks queued while the event loop was busy are read late. Such a
+  /// block used to reopen the audio, and with no downlink to follow it the
+  /// local timer then sent uplink for good, also between calls.
+  int? _closedEpoch;
 
   /// Cumulative audio blocks handed to the link (§13.2).
   int get sentBlocks => _link.sentAudio;
@@ -440,6 +461,7 @@ class HeraSession {
 
       case HeraEventId.audioClose:
         _audioOpen = false;
+        _closedEpoch = _epoch;
         _stopFreeRun();
         _resetAudio();
 
@@ -471,6 +493,8 @@ class HeraSession {
   }
 
   void _onAudioBlock(HeraAudioBlock block) {
+    // Late blocks of a stream that has already been closed.
+    if (!_audioOpen && block.epoch == _closedEpoch) return;
     // A new epoch means a new audio stream; reset without waiting for the
     // event, which may arrive later on the control channel (§6.3).
     if (block.epoch != _epoch) {
@@ -494,6 +518,12 @@ class HeraSession {
       missing = gap > maxConcealedBlocks ? 0 : gap;
       _downlinkLost += gap;
     }
+    // A downlink that really stopped resumes with a jump in the timestamps:
+    // the time the timer covered is not coming back, so neither is owed.
+    if (expected != null && block.timestamp != expected &&
+        missing == 0) {
+      _freeRunCredit = 0;
+    }
     _expectedTimestamp = block.timestamp +
         block.count * block.format.samplesPerBlock(block.frameMs);
 
@@ -506,8 +536,15 @@ class HeraSession {
     }
     if (!_downlink.isClosed) _downlink.add(block);
 
-    // One block per received block, plus one per lost block (§6.4).
-    _sendUplink(block.count + missing, block.format);
+    // One block per received block, plus one per lost block (§6.4), less
+    // what the local timer already sent for the same time.
+    var owed = block.count + missing;
+    if (_freeRunCredit > 0) {
+      final used = owed < _freeRunCredit ? owed : _freeRunCredit;
+      _freeRunCredit -= used;
+      owed -= used;
+    }
+    if (owed > 0) _sendUplink(owed, block.format);
   }
 
   /// Sends [blocks] uplink blocks, split into several frames if they do not
@@ -561,6 +598,7 @@ class HeraSession {
       final format = _format;
       if (format == null || !_audioOpen) return;
       _sendUplink(1, format);
+      _freeRunCredit++;
     });
   }
 
@@ -574,6 +612,7 @@ class HeraSession {
   void _resetAudio() {
     _uplinkTimestamp = 0;
     _expectedTimestamp = null;
+    _freeRunCredit = 0;
   }
 
   // ----------------------------------------------------------- statistics ---

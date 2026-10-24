@@ -22,6 +22,7 @@
 #include "util.h"
 
 static const char *HFP_HF_UUID = "0000111e-0000-1000-8000-00805f9b34fb";
+static const char *HFP_AG_UUID = "0000111f-0000-1000-8000-00805f9b34fb";
 
 /* SDP record for the Hands-Free role. */
 static const char *HFP_SDP_RECORD =
@@ -318,6 +319,8 @@ static int dict_open(sd_bus_message *m, const char *key)
     return sd_bus_message_append(m, "s", key);
 }
 
+/* No "Role": BlueZ accepts the phone's connections and also opens them itself,
+ * for ConnectProfile (auto-reconnect) and AutoConnect. */
 static int register_hfp(bluez_t *bz)
 {
     int r = sd_bus_add_object_vtable(bz->bus, &bz->profile_slot,
@@ -336,7 +339,6 @@ static int register_hfp(bluez_t *bz)
     sd_bus_message_append(m, "os", g_config.profile_path, HFP_HF_UUID);
     sd_bus_message_open_container(m, 'a', "{sv}");
     dict_open(m, "Name");                  sd_bus_message_append(m, "v", "s", "HERA HFP");       sd_bus_message_close_container(m);
-    dict_open(m, "Role");                  sd_bus_message_append(m, "v", "s", "server");         sd_bus_message_close_container(m);
     dict_open(m, "RequireAuthentication"); sd_bus_message_append(m, "v", "b", 0);                 sd_bus_message_close_container(m);
     dict_open(m, "RequireAuthorization");  sd_bus_message_append(m, "v", "b", 0);                 sd_bus_message_close_container(m);
     dict_open(m, "AutoConnect");           sd_bus_message_append(m, "v", "b", 1);                 sd_bus_message_close_container(m);
@@ -366,8 +368,10 @@ static int register_hfp(bluez_t *bz)
  *
  * Runs at start-up and after every drop: HERA_RECONNECT_ATTEMPTS attempts
  * every HERA_RECONNECT_INTERVAL seconds, then one attempt per minute until
- * the phone is back. The phone may reconnect on its own at the same time;
- * hfp_connect() then finds the link up and does nothing. */
+ * the phone is back. Each attempt goes through BlueZ (ConnectProfile), or, if
+ * BlueZ cannot connect the profile, through sdptool and a raw RFCOMM socket
+ * (hfp_connect). The phone may reconnect on its own at the same time; the
+ * second link is then refused and the first one kept. */
 /* Sleep up to `ms`; returns 1 if the supervisor must stop. */
 static int reconnect_wait(bluez_t *bz, int ms)
 {
@@ -388,12 +392,71 @@ static int reconnect_wait(bluez_t *bz, int ms)
     return stop;
 }
 
+/* Asks BlueZ to open the Hands-Free link: it finds the phone's channel and
+ * hands the socket to the profile (NewConnection, on the main loop). Returns 1
+ * if the link is up or coming up, 0 if the attempt failed, -1 if BlueZ cannot
+ * connect this profile, in which case the caller falls back to hfp_connect().
+ *
+ * Runs on the reconnect thread with its own bus connection: an sd_bus object
+ * must not be shared between threads. */
+static int connect_via_bluez(bluez_t *bz, sd_bus **bus, const char *address)
+{
+    if (!*bus && sd_bus_open_system(bus) < 0) {
+        *bus = NULL;
+        return -1;
+    }
+    char path[sizeof(bz->adapter_path) + 32];
+    int n = snprintf(path, sizeof(path), "%s/dev_%s", bz->adapter_path,
+                     address);
+    if (n < 0 || (size_t)n >= sizeof(path))
+        return -1;
+    for (char *c = path + strlen(bz->adapter_path); *c; c++) {
+        if (*c == ':')
+            *c = '_';
+    }
+
+    sd_bus_message *m = NULL;
+    if (sd_bus_message_new_method_call(*bus, &m, "org.bluez", path,
+                                       "org.bluez.Device1",
+                                       "ConnectProfile") < 0)
+        return -1;
+    sd_bus_message_append(m, "s", HFP_AG_UUID);
+    sd_bus_error err = SD_BUS_ERROR_NULL;
+    /* Bounded, so that stopping the service waits at most this long. */
+    int r = sd_bus_call(*bus, m, 15 * 1000000ULL, &err, NULL);
+    sd_bus_message_unref(m);
+
+    int result = 1;
+    if (r < 0) {
+        const char *name = err.name ? err.name : "";
+        if (!strcmp(name, "org.bluez.Error.AlreadyConnected") ||
+            !strcmp(name, "org.bluez.Error.InProgress")) {
+            result = 1;
+        } else if (!strcmp(name, "org.bluez.Error.NotAvailable") ||
+                   !strcmp(name, "org.bluez.Error.NotSupported")) {
+            log_info("adapter", "BlueZ cannot open HFP to %s (%s): "
+                     "falling back to a direct RFCOMM connection", address,
+                     err.message ? err.message : name);
+            result = -1;
+        } else {
+            log_info("adapter", "Reconnect to %s failed: %s", address,
+                     err.message ? err.message : strerror(-r));
+            result = 0;
+        }
+    }
+    sd_bus_error_free(&err);
+    return result;
+}
+
 static void *reconnect_worker(void *arg)
 {
     bluez_t *bz = arg;
     int attempt = 0;
     int was_connected = 0;
     int trusted = 0;
+    /* Own bus connection for ConnectProfile; see connect_via_bluez(). */
+    sd_bus *bus = NULL;
+    int direct = 0;
 
     for (;;) {
         if (hfp_is_connected(bz->hfp)) {
@@ -436,14 +499,24 @@ static void *reconnect_worker(void *arg)
         if (fast || attempt % 10 == 0)
             log_info("adapter", "Reconnecting to %s (attempt %d%s)", address,
                      attempt, fast ? "" : ", once a minute");
-        int ok = hfp_connect(bz->hfp, address);
+        int ok = direct ? -1 : connect_via_bluez(bz, &bus, address);
+        if (ok < 0) {
+            direct = 1;
+            ok = hfp_connect(bz->hfp, address);
+        }
         free(address);
-        if (ok)
+        if (ok) {
+            /* The socket reaches the HFP thread through the main loop: give
+             * it a moment before checking again. */
+            if (reconnect_wait(bz, 2000))
+                break;
             continue;
+        }
         int wait_s = fast ? g_config.reconnect_interval : RECONNECT_SLOW_S;
         if (reconnect_wait(bz, wait_s * 1000))
             break;
     }
+    sd_bus_flush_close_unref(bus);
     return NULL;
 }
 
@@ -518,7 +591,8 @@ int bluez_setup(bluez_t *bz, hfp_t *hfp, const gatt_cb_t *gcb)
     if (!bz->gatt || gatt_register(bz->gatt) != 0)
         return -1;
 
-    /* Auto-reconnect uses raw sockets and sdptool, so it stays off the bus. */
+    /* Auto-reconnect blocks on each attempt, so it has its own thread and its
+     * own bus connection. */
     if (g_config.auto_reconnect) {
         if (pthread_create(&bz->reconnect, NULL, reconnect_worker, bz) == 0)
             bz->reconnect_started = 1;

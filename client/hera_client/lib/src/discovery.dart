@@ -308,21 +308,39 @@ class HeraDiscovery {
   static bool _looksLikeHera(String name) =>
       name.toUpperCase().startsWith(HeraTransport.deviceName);
 
+  /// GATT status 5 (insufficient authentication) right after connecting:
+  /// the link was encrypted with keys the device does not have.
+  static const int _gattInsufficientAuthentication = 5;
+
+  static void _throwIfStalePairing(BluetoothDevice device) {
+    final reason = device.disconnectReason;
+    if (reason?.code == _gattInsufficientAuthentication) {
+      debugPrint('HeraDiscovery: disconnected with ${reason?.description}: '
+          'stale pairing');
+      throw const HeraStalePairingException();
+    }
+  }
+
   /// Connects to [device] and discovers the three characteristics.
   Future<void> connect(HeraDevice device) async {
     await disconnect();
     final target = BluetoothDevice.fromId(device.id);
     await target.connect(timeout: const Duration(seconds: 12));
-    // NET_STATE and SESSION can exceed the default ATT MTU (§3.4).
-    if (Platform.isAndroid) {
-      try {
-        await target.requestMtu(128);
-      } catch (error) {
-        debugPrint('HeraDiscovery: MTU request failed, $error');
+    final List<BluetoothService> services;
+    try {
+      // NET_STATE and SESSION can exceed the default ATT MTU (§3.4).
+      if (Platform.isAndroid) {
+        try {
+          await target.requestMtu(128);
+        } catch (error) {
+          debugPrint('HeraDiscovery: MTU request failed, $error');
+        }
       }
+      services = await target.discoverServices();
+    } catch (_) {
+      _throwIfStalePairing(target);
+      rethrow;
     }
-
-    final services = await target.discoverServices();
     for (final service in services) {
       if (service.serviceUuid != HeraGatt.service) continue;
       for (final characteristic in service.characteristics) {

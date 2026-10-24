@@ -14,6 +14,7 @@
 
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/wait.h>
 
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/rfcomm.h>
@@ -679,7 +680,10 @@ static int find_ag_channel(const char *address)
             break;
         channel = -1;
     }
-    pclose(p);
+    int status = pclose(p);
+    if (channel < 0 && WIFEXITED(status) && WEXITSTATUS(status) == 127)
+        log_warn("hfp", "sdptool not installed: cannot look up the phone's "
+                 "HFP channel");
     return channel;
 }
 

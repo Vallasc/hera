@@ -134,6 +134,7 @@ make            # hera-device (requires Linux, BlueZ and libsystemd)
 make test       # host tests: wire format, §14 vectors, crypto, jitter, G.711, resampler
 make test-link  # link.c over localhost: handshake, takeover, resume (Linux only)
 make test-tsan  # the same under ThreadSanitizer: unsynchronised accesses
+make test-audio # audio.c over a fake SCO socket: both directions, all formats
 make tests/link_server  # link.c behind a scripted relay, for client tests
 make tools      # tools/hera_probe
 ```

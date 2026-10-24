@@ -11,6 +11,7 @@
 // which looks to the client like a device switched off: no FIN, no reply.
 
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -25,6 +26,17 @@ Future<bool> _until(bool Function() test, Duration timeout) async {
   return true;
 }
 
+/// Samples of a stream that break the recurrence of a sine at [freq] Hz
+/// (8 kHz). Every gap, repeat or corruption shows up as a large residual.
+int _glitches(List<int> s, double freq, {int skip = 800}) {
+  final k = 2 * math.cos(2 * math.pi * freq / 8000);
+  var bad = 0;
+  for (var i = skip + 2; i < s.length; i++) {
+    if ((k * s[i - 1] - s[i - 2] - s[i]).abs() > 4) bad++;
+  }
+  return bad;
+}
+
 void main() {
   final host = Platform.environment['HERA_INTEROP'];
   final container = Platform.environment['HERA_INTEROP_CONTAINER'];
@@ -36,6 +48,8 @@ void main() {
     var protectedLink = false;
     var downlink = 0;
     var uplinkCalls = 0;
+    var uplinkPhase = 0;
+    final downSamples = <int>[];
     HeraConnection? connection;
 
     connection = HeraConnection(
@@ -48,9 +62,20 @@ void main() {
         uplinkCalls++;
         final frameMs = connection?.session?.frameMs ?? Hera.maxFrameMs;
         final bytes = blocks * format.bytesPerBlock(frameMs);
-        return HeraUplink(
-            Uint8List(bytes)..fillRange(0, bytes, format.silenceByte),
-            filler: true);
+        if (format != HeraFormat.pcm16At8k) {
+          return HeraUplink(
+              Uint8List(bytes)..fillRange(0, bytes, format.silenceByte),
+              filler: true);
+        }
+        // A continuous 440 Hz sine, checked by the server.
+        final data = ByteData(bytes);
+        for (var i = 0; i < bytes ~/ 2; i++) {
+          final v = (8000 *
+                  math.sin(2 * math.pi * 440 * uplinkPhase++ / 8000))
+              .round();
+          data.setInt16(2 * i, v, Endian.little);
+        }
+        return HeraUplink(data.buffer.asUint8List());
       },
       onStatus: statuses.add,
       retryDelay: const Duration(milliseconds: 300),
@@ -62,7 +87,15 @@ void main() {
         stats++;
         protectedLink = s.isLinkProtected;
       });
-      session.downlink.listen((_) => downlink++);
+      session.downlink.listen((block) {
+        downlink++;
+        if (block.format == HeraFormat.pcm16At8k) {
+          final data = ByteData.sublistView(block.samples);
+          for (var i = 0; i + 1 < block.samples.length; i += 2) {
+            downSamples.add(data.getInt16(i, Endian.little));
+          }
+        }
+      });
     });
 
     await connection.start();
@@ -90,6 +123,32 @@ void main() {
     expect(downlink, greaterThan(200), reason: 'downlink audio blocks');
     expect(uplinkCalls, greaterThan(100), reason: 'uplink paced by downlink');
     expect(protectedLink, isTrue, reason: 'STATS flags parsed');
+
+    // Audio content, end to end through encryption and framing: the device
+    // sends a 300 Hz sine and checks the client's 440 Hz sine.
+    final format = connection.session!.format;
+    // ignore: avoid_print
+    print('format ${format?.name}, ${connection.session!.frameMs} ms blocks, '
+        '${downSamples.length} downlink samples');
+    if (format == HeraFormat.pcm16At8k) {
+      expect(downSamples.length, greaterThan(8000 * 6));
+      expect(_glitches(downSamples, 300), 0,
+          reason: 'downlink sine arrives intact');
+      if (container != null) {
+        final logs = await Process.run('podman', ['logs', container]);
+        final checks = RegExp(r'uplink check: (\d+) samples, (\d+) glitches')
+            .allMatches('${logs.stdout}${logs.stderr}')
+            .toList();
+        expect(checks, isNotEmpty, reason: 'uplink checked by the device');
+        final last = checks.last;
+        // ignore: avoid_print
+        print('device uplink check: ${last.group(1)} samples, '
+            '${last.group(2)} glitches');
+        expect(int.parse(last.group(1)!), greaterThan(8000 * 4));
+        expect(int.parse(last.group(2)!), 0,
+            reason: 'uplink sine arrives intact at the device');
+      }
+    }
 
     // A command and its effect.
     events.clear();

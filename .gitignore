@@ -6,6 +6,7 @@ device/tests/test_proto
 device/tests/test_link
 device/tests/test_link_tsan
 device/tests/link_server
+device/tests/test_audio
 device/tools/hera_probe
 device/src/*.o
 device/src/*.d

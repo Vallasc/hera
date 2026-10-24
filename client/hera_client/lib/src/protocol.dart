@@ -305,6 +305,16 @@ class HeraProtocolException implements Exception {
   String toString() => 'HeraProtocolException: $message';
 }
 
+/// The device rejected the phone's stored pairing keys, typically because
+/// the device was reinstalled and lost its own. The phone does not pair
+/// again by itself: the pairing must be removed on the phone (and on the
+/// device) and made again.
+class HeraStalePairingException extends HeraProtocolException {
+  const HeraStalePairingException()
+      : super('the device rejected the stored pairing keys; remove the '
+            'pairing on the phone and pair again');
+}
+
 // ----------------------------------------------------------------- encoding ---
 
 /// Builds a complete frame.

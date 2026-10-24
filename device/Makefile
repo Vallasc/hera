@@ -65,7 +65,7 @@ SODIUM_LIBS   := $(shell pkg-config --libs libsodium 2>/dev/null || \
 PROBE_BIN = tools/hera_probe
 PROBE_SRC = tools/hera_probe.c src/proto.c src/sec.c src/util.c
 
-.PHONY: test-tsan all clean test test-link tools
+.PHONY: test-audio test-tsan all clean test test-link tools
 
 all: $(BIN)
 
@@ -96,6 +96,15 @@ test-link: $(LINK_TEST_BIN)
 $(LINK_TEST_BIN): $(LINK_TEST_SRC)
 	$(CC) -std=gnu11 -O2 -Wall -Wextra -Wno-unused-parameter -pthread -Isrc \
 	    $(SODIUM_CFLAGS) -o $@ $(LINK_TEST_SRC) $(SODIUM_LIBS) -lm
+
+# audio.c end to end over a fake SCO socket (Linux: needs the BlueZ headers).
+AUDIO_TEST_SRC = tests/test_audio.c src/audio.c src/g711.c src/jitter.c \
+                 src/resample.c src/proto.c src/util.c src/log.c src/stats.c \
+                 src/config.c
+test-audio: $(AUDIO_TEST_SRC)
+	$(CC) -std=gnu11 -O2 -g -Wall -Wextra -Wno-unused-parameter -pthread \
+	    -Isrc -o tests/test_audio $(AUDIO_TEST_SRC) -lm
+	./tests/test_audio
 
 # The link test under ThreadSanitizer: reports any unsynchronised access
 # between the link thread and the threads that send.

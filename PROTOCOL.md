@@ -977,7 +977,18 @@ the device's jitter buffer would run empty. Therefore:
   client MUST switch to a local timer with period `frame_ms` and continue
   sending silence;
 - on the first block received afterwards, the client MUST resynchronise:
-  realign `expected_ts` to the received `ts` and return to the rule of §6.4.
+  realign `expected_ts` to the received `ts` and return to the rule of §6.4;
+- blocks whose `ts` continues from `expected_ts` (blocks that were queued,
+  not lost) MUST NOT be answered with uplink for the time the local timer
+  already covered: the client counts the blocks the timer sent and sends
+  uplink only for the received blocks beyond that count. A `ts` that jumps
+  past the concealment limit of §6.4 clears the count.
+
+*(informative)* The downlink most often "stops" because the client stopped
+reading it for a while (a busy event loop, garbage collection), and the
+blocks then arrive all together. Answering each of them as well as the timer
+ticks sends more than real time, and the device drops the excess at the top
+of its jitter buffer (`ul_late`), which is heard as choppy speech.
 
 ### 6.5 Jitter Buffer and Concealment
 
